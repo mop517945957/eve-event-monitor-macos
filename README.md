@@ -1,6 +1,12 @@
-# Screen Alarm
+# EVE 事件监测（macOS）
 
-Screen Alarm is a fully local macOS 13+ SwiftUI app that watches a selected rectangular screen region. It alarms when a configured target colour occupies enough pixels or when a saved image template is found. No network code, server, screenshot history, or upload is used.
+EVE 事件监测是一款完全本地运行的 macOS 13+ 屏幕事件监测工具。它可以监控指定的屏幕区域或应用窗口，在目标颜色达到设定比例或识别到保存的图像模板时发出警报。软件不包含网络请求、服务器、截图历史或上传功能。
+
+EVE Event Monitor is a fully local macOS 13+ SwiftUI app that watches a selected screen region or application window. It alarms when a configured target colour occupies enough pixels or when a saved image template is found. No network code, server, screenshot history, or upload is used.
+
+## Download
+
+Download the latest Apple Silicon installer from [GitHub Releases](https://github.com/mop517945957/eve-event-monitor-macos/releases/latest).
 
 ## Open and build
 
@@ -34,4 +40,3 @@ The first capture attempt requests **Screen Recording** permission. If it is den
 - Template matching is fixed-size and fixed-scale; it does not recognize rotated or scaled templates.
 - Template matching uses a fast sampled RGB comparison rather than OpenCV; very large templates can require a longer interval.
 - Captured previews are shown after the first live frame, not retained as screenshot history.
-
