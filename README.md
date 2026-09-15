@@ -8,6 +8,10 @@ EVE Event Monitor is a fully local macOS 13+ SwiftUI app that watches a selected
 
 Download the latest Apple Silicon installer from [GitHub Releases](https://github.com/mop517945957/eve-event-monitor-macos/releases/latest).
 
+### Windows version
+
+The Windows port is located in `windows/EVEEventMonitor.Windows`. It supports screen-region and application-window monitoring, colour thresholds, image-template matching, repeating alarms, local settings, and live preview. Tagged Windows builds are published as a self-contained 64-bit single-file EXE through GitHub Actions.
+
 ## Open and build
 
 1. Open `ScreenAlarm.xcodeproj` in Xcode 15 or newer.
