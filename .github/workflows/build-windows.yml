@@ -1,0 +1,58 @@
+name: Build Windows EXE
+
+on:
+  workflow_dispatch:
+  push:
+    tags:
+      - "windows-v*"
+
+permissions:
+  contents: write
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@v4
+
+      - name: Set up .NET
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: "8.0.x"
+
+      - name: Publish self-contained Windows EXE
+        shell: pwsh
+        run: >-
+          dotnet publish windows/EVEEventMonitor.Windows/EVEEventMonitor.Windows.csproj
+          --configuration Release
+          --runtime win-x64
+          --self-contained true
+          -p:PublishSingleFile=true
+          --output windows-dist
+
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: EVE-Event-Monitor-Windows-x64
+          path: windows-dist/EVE-Event-Monitor.exe
+          if-no-files-found: error
+
+      - name: Publish tagged build to GitHub Releases
+        if: startsWith(github.ref, 'refs/tags/windows-v')
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          @"
+          EVE 事件监测 Windows 首个公开版本。
+
+          - 适用于 Windows 10/11 64 位
+          - 单文件 EXE，无需预装 .NET
+          - 支持屏幕区域和应用窗口监测
+          - 支持颜色阈值与图像模板识别
+          - 完全本地运行，不上传截图或监测数据
+          "@ | Set-Content -Encoding UTF8 release-notes.md
+          gh release create "${{ github.ref_name }}" "windows-dist/EVE-Event-Monitor.exe" `
+            --title "EVE 事件监测 Windows v1.0.0" `
+            --notes-file release-notes.md
