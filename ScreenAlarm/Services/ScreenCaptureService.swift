@@ -98,7 +98,10 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() { let current = stream; stream = nil; source = nil; if let current { Task { try? await current.stopCapture() } } }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
-        guard outputType == .screen, CMSampleBufferIsValid(sampleBuffer), let buffer = sampleBuffer.imageBuffer, let source else { return }
+        guard outputType == .screen, CMSampleBufferIsValid(sampleBuffer),
+              let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+              let status = attachments.first?[.status] as? Int, status == SCFrameStatus.complete.rawValue,
+              let buffer = sampleBuffer.imageBuffer, let source else { return }
         let ci = CIImage(cvPixelBuffer: buffer)
         let ciContext = CIContext(options: [.cacheIntermediates: false])
         guard let full = ciContext.createCGImage(ci, from: ci.extent) else { return }
@@ -129,7 +132,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     }
 
     private func resolveWindow(_ target: WindowTarget, from windows: [SCWindow]) -> SCWindow? {
-        if let exact = windows.first(where: { $0.windowID == target.windowID }) { return exact }
+        if let exact = windows.first(where: { $0.windowID == target.windowID && $0.owningApplication?.processID == target.applicationPID }) { return exact }
         return windows.first {
             guard let app = $0.owningApplication else { return false }
             let sameApp: Bool

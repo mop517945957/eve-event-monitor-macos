@@ -45,6 +45,8 @@ final class RegionPreviewWindowController: NSObject, NSWindowDelegate {
         }
     }
 
+    func setInteractionLocked(_ locked: Bool) { panel.ignoresMouseEvents = locked }
+
     func show() {
         guard imageView.image != nil else { return }
         wasClosedByUser = false

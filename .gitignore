@@ -16,3 +16,6 @@ xcuserdata/
 .env
 .env.*
 !.env.example
+
+# Local installers and app backups (published as Release assets)
+dist/

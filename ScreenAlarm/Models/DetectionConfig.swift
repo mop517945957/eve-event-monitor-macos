@@ -20,6 +20,7 @@ struct DetectionConfig: Codable {
     var requiredMisses: Int = 3
     var alarmSoundPath: String?
     var alarmVolume: Double = 0.8
+    var automaticClickEnabled: Bool = true
 
     // Decode older v1 settings without discarding the user's saved rules.
     init() {}
@@ -27,7 +28,7 @@ struct DetectionConfig: Codable {
     private enum CodingKeys: String, CodingKey {
         case captureMode, region, windowTarget, windowCrop, colorRules, templateRules, colorTolerance,
              minimumMatchingPixels, templateSimilarity, intervalMilliseconds, requiredHits,
-             requiredMisses, alarmSoundPath, alarmVolume
+             requiredMisses, alarmSoundPath, alarmVolume, automaticClickEnabled
     }
 
     init(from decoder: Decoder) throws {
@@ -46,5 +47,6 @@ struct DetectionConfig: Codable {
         requiredMisses = try values.decodeIfPresent(Int.self, forKey: .requiredMisses) ?? 3
         alarmSoundPath = try values.decodeIfPresent(String.self, forKey: .alarmSoundPath)
         alarmVolume = try values.decodeIfPresent(Double.self, forKey: .alarmVolume) ?? 0.8
+        automaticClickEnabled = try values.decodeIfPresent(Bool.self, forKey: .automaticClickEnabled) ?? true
     }
 }

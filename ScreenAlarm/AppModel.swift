@@ -3,18 +3,33 @@ import AppKit
 
 @MainActor
 final class AppModel: ObservableObject {
-    @Published var config: DetectionConfig { didSet { store.save(config) } }
+    @Published var config: DetectionConfig {
+        didSet {
+            store.save(config)
+            guard config.automaticClickEnabled != oldValue.automaticClickEnabled else { return }
+            if config.automaticClickEnabled, state == .triggered {
+                armMouseAutomation()
+            } else {
+                mouseAutomation.disarm()
+            }
+        }
+    }
     @Published var isMonitoring = false
     @Published var state: DetectionState = .idle
     @Published var debug = DebugInfo()
     @Published var lastPreview: NSImage?
     @Published var hasPermission = PermissionService.hasScreenRecordingPermission
+    @Published var hasAccessibilityPermission = PermissionService.hasAccessibilityPermission
     @Published var lastError: String?
     @Published var selectableWindows: [WindowTarget] = []
     @Published var isWindowPickerPresented = false
     @Published var isLoadingWindows = false
     private let store = SettingsStore(), capture = ScreenCaptureService(), alarm = AlarmService()
+    private let mouseAutomation = MouseAutomationService()
     private let regionPreview = RegionPreviewWindowController()
+    private var cropCapture: ScreenCaptureService?
+    private var cropEditor: WindowCropEditor?
+    private var cropRequest = UUID()
     private var lastDetection = Date.distantPast, lastFrame = Date.distantPast, lastPreviewUpdate = Date.distantPast
 
     init() {
@@ -23,7 +38,14 @@ final class AppModel: ObservableObject {
         capture.onCaptureStopped = { [weak self] error in Task { @MainActor in self?.captureStopped(error) } }
     }
     var statusText: String { isMonitoring ? (state == .triggered ? "已触发报警" : "正在监控") : "未运行" }
-    func refreshPermission() { hasPermission = PermissionService.hasScreenRecordingPermission }
+    func refreshPermission() {
+        hasPermission = PermissionService.hasScreenRecordingPermission
+        hasAccessibilityPermission = PermissionService.hasAccessibilityPermission
+    }
+    func requestAccessibilityPermission() {
+        PermissionService.requestAccessibility()
+        refreshPermission()
+    }
     func toggleMonitoring() { isMonitoring ? stopMonitoring() : startMonitoring() }
     func startMonitoring() {
         refreshPermission(); guard hasPermission else { PermissionService.request(); lastError = "请先授予屏幕录制权限。"; return }
@@ -31,11 +53,23 @@ final class AppModel: ObservableObject {
         lastError = nil; state = .idle; debug = DebugInfo(); isMonitoring = true
         startCaptureForSelectedSource()
     }
-    func stopMonitoring() { isMonitoring = false; capture.stop(); alarm.stop(); state = .idle; debug.hitFrames = 0; debug.missFrames = 0 }
+    func stopMonitoring() { isMonitoring = false; capture.stop(); alarm.stop(); mouseAutomation.disarm(); state = .idle; debug.hitFrames = 0; debug.missFrames = 0 }
+    /// Aggregate independent window detectors into one sound/automatic-click lifecycle.
+    func updateGroupStatus(running: Bool, triggered: Bool) {
+        isMonitoring = running
+        if triggered && state != .triggered {
+            state = .triggered
+            alarm.startRepeating(path: config.alarmSoundPath, interval: 1, volume: config.alarmVolume)
+            if config.automaticClickEnabled { armMouseAutomation() }
+        } else if !triggered {
+            if state == .triggered { alarm.stop(); mouseAutomation.disarm() }
+            state = .idle
+        }
+    }
     func process(_ image: CGImage) {
         let now = Date()
         // A selected region provides a live preview before monitoring starts. This only
-        // creates an NSImage; colour/template detection still remains disabled.
+        // creates an NSImage; colour detection still remains disabled.
         if now.timeIntervalSince(lastPreviewUpdate) >= (1.0 / 15.0) {
             let preview = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
             lastPreview = preview
@@ -47,19 +81,31 @@ final class AppModel: ObservableObject {
         let colorResult = ColorDetectionService.match(in: image, rules: config.colorRules, tolerance: config.colorTolerance, minimum: config.minimumMatchingPixels)
         debug.matchingPixels = colorResult.maximumPixels
         debug.matchingColorHex = colorResult.matchingRule?.hex
-        var top = 0.0
-        for rule in config.templateRules { if let template = TemplateStore.shared.image(for: rule) { top = max(top, TemplateMatchingService.bestSimilarity(template: template, in: image, threshold: config.templateSimilarity)) }; if top >= config.templateSimilarity { break } }
-        debug.topTemplateSimilarity = top
-        advance(hit: colorResult.isMatch || top >= config.templateSimilarity)
+        // Legacy template settings are retained for compatibility but no longer evaluated.
+        debug.topTemplateSimilarity = 0
+        advance(hit: colorResult.isMatch)
     }
     private func advance(hit: Bool) {
-        if hit { debug.hitFrames += 1; debug.missFrames = 0; if state != .triggered && debug.hitFrames >= config.requiredHits { state = .triggered; alarm.startRepeating(path: config.alarmSoundPath, interval: 1.0, volume: config.alarmVolume) } else if state == .idle { state = .detecting } }
+        if hit {
+            debug.hitFrames += 1
+            debug.missFrames = 0
+            if state != .triggered && debug.hitFrames >= config.requiredHits {
+                state = .triggered
+                alarm.startRepeating(path: config.alarmSoundPath, interval: 1.0, volume: config.alarmVolume)
+                if config.automaticClickEnabled {
+                    armMouseAutomation()
+                }
+            } else if state == .idle {
+                state = .detecting
+            }
+        }
         else {
             debug.missFrames += 1
             debug.hitFrames = 0
             if state == .triggered && debug.missFrames >= config.requiredMisses {
                 // Target is truly gone: automatically clear both the alarm sound and latch.
                 alarm.stop()
+                mouseAutomation.disarm()
                 state = .idle
             } else if state == .detecting {
                 state = .idle
@@ -93,42 +139,76 @@ final class AppModel: ObservableObject {
         }
     }
     func setWindow(_ target: WindowTarget) {
+        stopMonitoring()
+        cropRequest = UUID()
+        isLoadingWindows = false
+        cropCapture?.stop(); cropCapture = nil
+        cropEditor?.cancel(); cropEditor = nil
+        lastPreview = nil
+        lastError = nil
         config.captureMode = .window
         config.windowTarget = target
         config.windowCrop = nil
         isWindowPickerPresented = false
         regionPreview.prepareForNewRegion()
-        startCaptureForSelectedSource()
     }
-    func selectWindowCrop() {
-        guard let target = config.windowTarget else { lastError = "请先选择监控窗口。"; return }
+    func selectWindowCrop(onSelected: ((WindowCrop) -> Void)? = nil) {
+        guard let target = config.windowTarget else { lastError = "请在上方窗口列表中指定监控窗口。"; return }
+        stopMonitoring()
+        cropEditor?.cancel(); cropEditor = nil
+        cropCapture?.stop()
+        let request = UUID()
+        cropRequest = request
+        let snapshot = ScreenCaptureService()
+        cropCapture = snapshot
+        isLoadingWindows = true
         lastError = nil
+        snapshot.onImage = { [weak self] image in
+            Task { @MainActor in
+                guard let self, self.cropRequest == request, self.cropCapture != nil else { return }
+                self.cropCapture?.stop(); self.cropCapture = nil
+                self.isLoadingWindows = false
+                self.cropEditor = WindowCropEditor(image: image, title: target.displayName) { [weak self] crop in
+                    guard let self, self.cropRequest == request else { return }
+                    self.cropEditor = nil
+                    guard let crop else { return }
+                    self.config.captureMode = .window
+                    self.config.windowCrop = crop
+                    onSelected?(crop)
+                    self.regionPreview.prepareForNewRegion()
+                    self.startCaptureForSelectedSource()
+                }
+                self.cropEditor?.show()
+            }
+        }
         Task {
             do {
-                // Refresh the frame immediately before selection, then save a crop
-                // relative to that frame so future window moves do not matter.
-                let refreshed = try await capture.refreshedTarget(for: target)
+                let refreshed = try await snapshot.refreshedTarget(for: target)
+                guard cropRequest == request else { snapshot.stop(); return }
                 config.windowTarget = refreshed
-                RegionSelectionPresenter.selectRegion { [weak self] region in self?.setWindowCrop(from: region, in: refreshed) }
+                try await snapshot.start(window: refreshed, crop: nil)
+                if cropRequest != request || cropCapture == nil { snapshot.stop(); return }
+                try await Task.sleep(nanoseconds: 8_000_000_000)
+                guard cropRequest == request, cropCapture != nil else { return }
+                snapshot.stop(); cropCapture = nil; isLoadingWindows = false
+                lastError = "未收到窗口画面，请恢复目标窗口后重试。"
             } catch {
+                guard cropRequest == request else { snapshot.stop(); return }
+                snapshot.stop(); cropCapture = nil; isLoadingWindows = false
                 lastError = error.localizedDescription
             }
         }
     }
     func addColor(_ color: ColorRule) { if !config.colorRules.contains(color) { config.colorRules.append(color) } }
     func removeColor(_ color: ColorRule) { config.colorRules.removeAll { $0.id == color.id } }
-    func addTemplate(_ image: CGImage) { if let rule = TemplateStore.shared.save(image) { config.templateRules.append(rule) } }
-    func removeTemplate(_ rule: TemplateRule) { TemplateStore.shared.delete(rule); config.templateRules.removeAll { $0.id == rule.id } }
     func dismissAlarm() { alarm.stop() }
+    func setPreviewInteractionLocked(_ locked: Bool) { regionPreview.setInteractionLocked(locked) }
     func showRegionPreview() { regionPreview.show() }
     func testAlarm() { alarm.playOnce(path: config.alarmSoundPath, volume: config.alarmVolume) }
     func chooseSound() { let panel = NSOpenPanel(); panel.allowedContentTypes = [.wav, .mp3, .mpeg4Audio]; panel.allowsMultipleSelection = false; if panel.runModal() == .OK { config.alarmSoundPath = panel.url?.path } }
 
     var hasSelectedSource: Bool {
-        switch config.captureMode {
-        case .region: return config.region != nil
-        case .window: return config.windowTarget != nil && config.windowCrop != nil
-        }
+        return config.captureMode == .window && config.windowTarget != nil && config.windowCrop != nil
     }
 
     private func startCaptureForSelectedSource() {
@@ -162,35 +242,18 @@ final class AppModel: ObservableObject {
         if isMonitoring {
             isMonitoring = false
             alarm.stop()
+            mouseAutomation.disarm()
             state = .idle
         }
     }
 
-    private func setWindowCrop(from region: MonitorRegion, in target: WindowTarget) {
-        guard target.frame.width > 0, target.frame.height > 0,
-              let screen = NSScreen.screens.first(where: {
-                  ($0.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value == region.displayID
-              }) else {
-            lastError = "无法确定窗口内区域，请重新选择监控窗口。"
-            return
+    private func armMouseAutomation() {
+        mouseAutomation.arm { [weak self] in
+            guard let self else { return }
+            self.hasAccessibilityPermission = false
+            self.lastError = "自动点击需要辅助功能权限；授权后，报警仍存在且鼠标静止满 1 分钟时会执行一次左键单击。"
+            PermissionService.requestAccessibility()
         }
-        let selected = CGRect(
-            x: screen.frame.minX + region.x,
-            y: screen.frame.minY + region.y,
-            width: region.width,
-            height: region.height
-        )
-        let clipped = selected.intersection(target.frame)
-        guard clipped.width >= 3, clipped.height >= 3 else {
-            lastError = "请在已绑定窗口内部拖拽监控区域。"
-            return
-        }
-        let x = (clipped.minX - target.frame.minX) / target.frame.width
-        let y = 1 - (clipped.maxY - target.frame.minY) / target.frame.height
-        let width = clipped.width / target.frame.width
-        let height = clipped.height / target.frame.height
-        config.windowCrop = WindowCrop(x: x, y: y, width: width, height: height)
-        regionPreview.prepareForNewRegion()
-        startCaptureForSelectedSource()
     }
+
 }

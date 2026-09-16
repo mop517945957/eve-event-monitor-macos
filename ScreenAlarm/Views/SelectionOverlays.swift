@@ -111,3 +111,94 @@ private final class SelectionCanvas: NSView {
     }
     private func finishColor(at point: CGPoint) { if let rule = color(at: point) { done(.color(rule)) } }
 }
+
+/// Coordinates are measured on the captured window image, never on the desktop.
+enum WindowCropGeometry {
+    static func imageRect(imageSize: NSSize, bounds: NSRect) -> NSRect {
+        guard imageSize.width > 0, imageSize.height > 0 else { return .zero }
+        let scale = min(bounds.width / imageSize.width, bounds.height / imageSize.height)
+        let size = NSSize(width: imageSize.width * scale, height: imageSize.height * scale)
+        return NSRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2, width: size.width, height: size.height)
+    }
+    static func crop(start: NSPoint, end: NSPoint, imageRect: NSRect) -> WindowCrop? {
+        guard imageRect.width > 0, imageRect.height > 0, imageRect.contains(start) else { return nil }
+        let selection = NSRect(x: min(start.x, end.x), y: min(start.y, end.y), width: abs(end.x - start.x), height: abs(end.y - start.y)).intersection(imageRect)
+        guard selection.width >= 3, selection.height >= 3 else { return nil }
+        return WindowCrop(x: (selection.minX - imageRect.minX) / imageRect.width,
+                          y: (selection.minY - imageRect.minY) / imageRect.height,
+                          width: selection.width / imageRect.width, height: selection.height / imageRect.height)
+    }
+}
+
+@MainActor
+final class WindowCropEditor: NSObject, NSWindowDelegate {
+    private let panel: NSPanel
+    private var completion: ((WindowCrop?) -> Void)?
+    init(image: CGImage, title: String, completion: @escaping (WindowCrop?) -> Void) {
+        self.completion = completion
+        let available = NSScreen.main?.visibleFrame.size ?? NSSize(width: 1100, height: 800)
+        panel = CropEditorPanel(contentRect: NSRect(x: 0, y: 0, width: min(1100, available.width - 80), height: min(740, available.height - 100)), styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+        super.init()
+        panel.title = "\(title) · 在窗口快照内拖拽选区，松开确认，Esc 取消"
+        panel.isReleasedWhenClosed = false
+        panel.minSize = NSSize(width: 420, height: 300)
+        panel.level = .screenSaver
+        panel.delegate = self
+        let canvas = WindowCropCanvas(image: image) { [weak self] crop in self?.finish(crop) }
+        panel.contentView = canvas
+        panel.center()
+    }
+    func show() { NSApp.activate(ignoringOtherApps: true); panel.makeKeyAndOrderFront(nil); panel.makeFirstResponder(panel.contentView) }
+    func cancel() { finish(nil) }
+    func windowWillClose(_ notification: Notification) { finish(nil) }
+    private func finish(_ crop: WindowCrop?) {
+        guard let completion else { return }
+        self.completion = nil
+        panel.orderOut(nil)
+        completion(crop)
+    }
+}
+
+private final class CropEditorPanel: NSPanel {
+    override var canBecomeKey: Bool { true }
+}
+
+private final class WindowCropCanvas: NSView {
+    private let image: NSImage
+    private let done: (WindowCrop?) -> Void
+    private var start: NSPoint?
+    private var current = NSPoint.zero
+    override var isFlipped: Bool { true }
+    override var acceptsFirstResponder: Bool { true }
+    init(image: CGImage, done: @escaping (WindowCrop?) -> Void) {
+        self.image = NSImage(cgImage: image, size: NSSize(width: image.width, height: image.height))
+        self.done = done
+        super.init(frame: .zero)
+        autoresizingMask = [.width, .height]
+    }
+    required init?(coder: NSCoder) { fatalError() }
+    private var imageRect: NSRect { WindowCropGeometry.imageRect(imageSize: image.size, bounds: bounds) }
+    override func resetCursorRects() { addCursorRect(imageRect, cursor: .crosshair) }
+    override func draw(_ dirtyRect: NSRect) {
+        NSColor.black.setFill(); bounds.fill()
+        image.draw(in: imageRect, from: .zero, operation: .copy, fraction: 1, respectFlipped: true, hints: nil)
+        if let start {
+            let rect = NSRect(x: min(start.x, current.x), y: min(start.y, current.y), width: abs(current.x - start.x), height: abs(current.y - start.y)).intersection(imageRect)
+            NSColor.systemYellow.withAlphaComponent(0.2).setFill(); rect.fill()
+            NSColor.systemYellow.setStroke(); let path = NSBezierPath(rect: rect); path.lineWidth = 2; path.stroke()
+        }
+    }
+    override func mouseDown(with event: NSEvent) {
+        let point = convert(event.locationInWindow, from: nil)
+        guard imageRect.contains(point) else { return }
+        start = point; current = point; needsDisplay = true
+    }
+    override func mouseDragged(with event: NSEvent) { current = convert(event.locationInWindow, from: nil); needsDisplay = true }
+    override func mouseUp(with event: NSEvent) {
+        guard let start else { return }
+        let end = convert(event.locationInWindow, from: nil)
+        self.start = nil; needsDisplay = true
+        if let crop = WindowCropGeometry.crop(start: start, end: end, imageRect: imageRect) { done(crop) }
+    }
+    override func keyDown(with event: NSEvent) { if event.keyCode == 53 { done(nil) } else { super.keyDown(with: event) } }
+}
