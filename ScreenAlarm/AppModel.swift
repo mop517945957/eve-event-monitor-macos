@@ -59,7 +59,7 @@ final class AppModel: ObservableObject {
         isMonitoring = running
         if triggered && state != .triggered {
             state = .triggered
-            alarm.startRepeating(path: config.alarmSoundPath, interval: 1, volume: config.alarmVolume)
+            alarm.startVoice(.local, volume: config.alarmVolume)
             if config.automaticClickEnabled { armMouseAutomation() }
         } else if !triggered {
             if state == .triggered { alarm.stop(); mouseAutomation.disarm() }
@@ -91,7 +91,7 @@ final class AppModel: ObservableObject {
             debug.missFrames = 0
             if state != .triggered && debug.hitFrames >= config.requiredHits {
                 state = .triggered
-                alarm.startRepeating(path: config.alarmSoundPath, interval: 1.0, volume: config.alarmVolume)
+                alarm.startVoice(.local, volume: config.alarmVolume)
                 if config.automaticClickEnabled {
                     armMouseAutomation()
                 }
@@ -204,7 +204,9 @@ final class AppModel: ObservableObject {
     func dismissAlarm() { alarm.stop() }
     func setPreviewInteractionLocked(_ locked: Bool) { regionPreview.setInteractionLocked(locked) }
     func showRegionPreview() { regionPreview.show() }
-    func testAlarm() { alarm.playOnce(path: config.alarmSoundPath, volume: config.alarmVolume) }
+    private let voicePreview = AlarmService()
+    func testAlarm() { voicePreview.startVoice(.local, volume: config.alarmVolume, repeating: false) }
+    func testIntelVoice() { voicePreview.startVoice(.intel, volume: config.alarmVolume, repeating: false) }
     func chooseSound() { let panel = NSOpenPanel(); panel.allowedContentTypes = [.wav, .mp3, .mpeg4Audio]; panel.allowsMultipleSelection = false; if panel.runModal() == .OK { config.alarmSoundPath = panel.url?.path } }
 
     var hasSelectedSource: Bool {

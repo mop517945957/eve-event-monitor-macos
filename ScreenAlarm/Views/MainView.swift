@@ -5,20 +5,116 @@ import AppKit
 struct MainView: View {
     @EnvironmentObject private var model: AppModel
     @EnvironmentObject private var preview: MultiWindowPreview
+    @EnvironmentObject private var equipment: EquipmentMonitor
+    @State private var expandedWindow: UInt32?
+    @State private var showGeneral = false
+    private var monitoring: Bool { preview.groupRunning || equipment.running }
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 18) {
-                HStack { VStack(alignment: .leading) { Text("Screen Alarm").font(.largeTitle.bold()); Text("平安生产，财源滚滚").foregroundStyle(.secondary) }; Spacer(); StatusBadge(text: model.statusText, active: model.isMonitoring) }
-                if !model.hasPermission { PermissionNotice() }
-                MultiWindowPreviewSection(preview: preview)
-                IntelSettingsSection(intel: preview.intel)
-                Divider(); ColorSection(); Divider(); DetectionSection(); Divider(); SoundSection(); Divider(); AutomaticClickSection()
-                if let error = model.lastError { Text(error).foregroundStyle(.red).font(.callout) }
-                HStack {
-                    Button("关闭报警") { model.dismissAlarm(); preview.dismissIntelAlarm() }.buttonStyle(.bordered).controlSize(.large).disabled(model.state != .triggered && preview.yellowIDs.isEmpty)
-                    Button(preview.groupRunning ? "停止全部监控" : "开始全部监控") { preview.toggleAllMonitoring(model: model) }.buttonStyle(.borderedProminent).controlSize(.large).frame(maxWidth: .infinity)
-                }.padding(.top, 4)
-            }.padding(24)
+        VStack(spacing: 0) {
+            HStack(alignment: .center, spacing: 12) {
+                VStack(alignment: .leading, spacing: 4) {
+                    Text("游戏窗口").font(.title2.bold())
+                    Text("已识别 \(preview.visibleWindows.count) 个角色窗口").font(.caption).foregroundStyle(.secondary)
+                }
+                Spacer()
+                Button(preview.running ? "关闭小窗口" : "显示小窗口") {
+                    if !preview.running { preview.selectEVE() }
+                    preview.toggle()
+                }
+                Button(monitoring ? "停止监护" : "开始监护") {
+                    preview.toggleProtection(model: model, equipment: equipment)
+                }.buttonStyle(.borderedProminent).disabled(equipment.calibrating != nil)
+                Button { model.dismissAlarm(); preview.dismissIntelAlarm(); equipment.mute() } label: {
+                    Image(systemName: "speaker.slash")
+                }.help("静音当前提醒").accessibilityLabel("静音当前提醒")
+                Button { showGeneral = true } label: { Image(systemName: "gearshape") }
+                    .help("通用设置").accessibilityLabel("通用设置")
+            }.padding(20)
+            Divider()
+            ScrollView {
+                VStack(alignment: .leading, spacing: 12) {
+                    if !model.hasPermission { PermissionNotice() }
+                    if preview.visibleWindows.isEmpty {
+                        VStack(spacing: 12) {
+                            Image(systemName: "rectangle.on.rectangle.slash").font(.largeTitle).foregroundStyle(.secondary)
+                            Text("等待游戏窗口").font(.headline)
+                            Text("登录 EVE 角色后会自动识别。").foregroundStyle(.secondary)
+                            Button("重新识别") { preview.refresh() }.disabled(preview.refreshing)
+                        }.frame(maxWidth: .infinity).padding(50)
+                    }
+                    ForEach(preview.visibleWindows) { target in
+                        VStack(alignment: .leading, spacing: 0) {
+                            HStack(spacing: 12) {
+                            Button { expandedWindow = expandedWindow == target.windowID ? nil : target.windowID } label: {
+                                HStack(spacing: 12) {
+                                    Image(systemName: "display").font(.title2).foregroundStyle(.tint)
+                                    VStack(alignment: .leading, spacing: 4) {
+                                        Text(LocalIntel.characterName(target.title)).font(.headline)
+                                        Text(preview.monitoredIDs.contains(target.windowID) ? "监护中" : "点击配置窗口监护").font(.caption).foregroundStyle(.secondary)
+                                    }
+                                    Spacer()
+                                    Image(systemName: expandedWindow == target.windowID ? "chevron.down" : "chevron.right").foregroundStyle(.secondary)
+                                }.padding(.vertical, 18).contentShape(Rectangle())
+                            }.buttonStyle(.plain)
+                            Button(preview.isPreviewVisible(for: target) ? "关闭小窗口" : "显示小窗口") { preview.togglePreview(for: target) }
+                            Button(preview.monitoredIDs.contains(target.windowID) || equipment.isRunning(for: target) ? "停止监护" : "开始监护") {
+                                preview.toggleProtection(for: target, model: model, equipment: equipment)
+                            }.disabled(equipment.calibrating != nil)
+                            }.padding(.horizontal, 18)
+                            if expandedWindow == target.windowID {
+                                Divider().padding(.horizontal, 18)
+                                WindowFeatureDrawers(preview: preview, equipment: equipment, target: target).padding(18)
+                            }
+                        }.background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
+                    }
+                    if let error = preview.error ?? model.lastError { Text(error).font(.callout).foregroundStyle(.orange) }
+                    if let message = equipment.message { Text(message).font(.callout).foregroundStyle(.orange) }
+                }.padding(20)
+            }
+        }
+        .sheet(isPresented: $showGeneral) {
+            VStack(spacing: 0) {
+                HStack { Text("通用设置").font(.title2.bold()); Spacer(); Button("完成") { showGeneral = false } }.padding(20)
+                Divider()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 18) {
+                        Text("以下设置对所有窗口生效").foregroundStyle(.secondary)
+                        VStack(alignment: .leading, spacing: 16) {
+                            DisclosureGroup {
+                                SharedPreviewSettings(preview: preview).padding(.top, 12)
+                            } label: { Label("小窗口与快捷键", systemImage: "pip").font(.headline) }
+                            Divider()
+                            DisclosureGroup {
+                                SoundSection().padding(.top, 12)
+                            } label: { Label("预警语音", systemImage: "speaker.wave.2").font(.headline) }
+                            Divider()
+                            DisclosureGroup {
+                                VStack(spacing: 16) { ColorSection(); DetectionSection() }.padding(.top, 12)
+                            } label: { Label("本地识别规则", systemImage: "viewfinder").font(.headline) }
+                            Divider()
+                            DisclosureGroup {
+                                AutomaticClickSection().padding(.top, 12)
+                            } label: { Label("报警后自动点击", systemImage: "cursorarrow.click").font(.headline) }
+                            Divider()
+                            DisclosureGroup {
+                                VStack(alignment: .leading, spacing: 12) {
+                                    Text(preview.intel.directory).font(.caption).textSelection(.enabled)
+                                    Button("选择目录") { preview.intel.chooseDirectory() }
+                                }.padding(.top, 12)
+                            } label: { Label("EVE 日志目录", systemImage: "folder").font(.headline) }
+                        }
+                        .disclosureGroupStyle(FullWidthDisclosureStyle())
+                        .padding(18)
+                        .background(Color.primary.opacity(0.045), in: RoundedRectangle(cornerRadius: 14))
+                    }.padding(20)
+                }
+            }.frame(width: 660, height: 620)
+        }
+        .task {
+            while !Task.isCancelled {
+                preview.refresh()
+                do { try await Task.sleep(nanoseconds: 5_000_000_000) } catch { return }
+            }
         }
         .onAppear { model.refreshPermission(); preview.refresh(); syncPreviewAlarm() }
         .onChange(of: preview.isLocked) { model.setPreviewInteractionLocked($0) }
@@ -41,7 +137,23 @@ private struct ColorSection: View { @EnvironmentObject var model: AppModel; var 
 
 private struct DetectionSection: View { @EnvironmentObject var model: AppModel; var body: some View { VStack(alignment: .leading, spacing: 10) { Text("检测").font(.headline); Picker("检测间隔", selection: $model.config.intervalMilliseconds) { Text("50 ms").tag(50); Text("100 ms").tag(100); Text("200 ms").tag(200); Text("500 ms").tag(500) }.pickerStyle(.segmented); HStack { Stepper("连续确认：\(model.config.requiredHits)", value: $model.config.requiredHits, in: 1...20); Spacer(); Stepper("解除确认：\(model.config.requiredMisses)", value: $model.config.requiredMisses, in: 1...20) } } } }
 
-private struct SoundSection: View { @EnvironmentObject var model: AppModel; var body: some View { VStack(alignment: .leading, spacing: 8) { Text("报警声音").font(.headline); Text("当前：\(model.config.alarmSoundPath.map { URL(fileURLWithPath: $0).lastPathComponent } ?? "Default Alarm")"); HStack { Button("选择声音") { model.chooseSound() }; Button("试听") { model.testAlarm() }; if model.config.alarmSoundPath != nil { Button("恢复默认", role: .destructive) { model.config.alarmSoundPath = nil } } }; HStack { Text("声音大小 \(Int(model.config.alarmVolume * 100))%").frame(width: 170, alignment: .leading); Slider(value: $model.config.alarmVolume, in: 0...1, step: 0.05) } } } }
+private struct SoundSection: View {
+    @EnvironmentObject var model: AppModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("预警语音").font(.headline)
+            Text("预警频道：平缓语气，约 12 秒一次。\n本地进人：急促语气，约 4 秒一次，优先于频道预警。")
+            HStack {
+                Button("试听频道预警") { model.testIntelVoice() }
+                Button("试听本地进人") { model.testAlarm() }
+            }
+            HStack {
+                Text("声音大小 \(Int(model.config.alarmVolume * 100))%").frame(width: 170, alignment: .leading)
+                Slider(value: $model.config.alarmVolume, in: 0...1, step: 0.05)
+            }
+        }
+    }
+}
 
 private struct AutomaticClickSection: View {
     @EnvironmentObject var model: AppModel
@@ -68,3 +180,54 @@ private struct AutomaticClickSection: View {
 }
 
 private struct FlowLayout<Item: Identifiable, Content: View>: View { let items: [Item]; @ViewBuilder let content: (Item) -> Content; var body: some View { LazyVGrid(columns: [GridItem(.adaptive(minimum: 115), spacing: 8)], alignment: .leading, spacing: 6) { ForEach(items) { content($0) } } } }
+
+private struct WindowFeatureDrawers: View {
+    @ObservedObject var preview: MultiWindowPreview
+    @ObservedObject var equipment: EquipmentMonitor
+    let target: WindowTarget
+    @State private var windowOpen = false
+    @State private var intelOpen = false
+    @State private var equipmentOpen = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            DisclosureGroup(isExpanded: $windowOpen) {
+                WindowSettingsCard(preview: preview, target: target, embedded: true).padding(.top, 10)
+            } label: { Label("监控小窗口", systemImage: "pip").font(.headline) }
+            Divider()
+            DisclosureGroup(isExpanded: $intelOpen) {
+                VStack(alignment: .leading, spacing: 12) {
+                    CharacterIntelView(intel: preview.intel, title: target.title, monitoring: preview.monitoredIDs.contains(target.windowID))
+                    IntelSettingsSection(intel: preview.intel, title: target.title)
+                }.padding(.top, 10)
+            } label: { Label("预警频道", systemImage: "antenna.radiowaves.left.and.right").font(.headline) }
+            Divider()
+            DisclosureGroup(isExpanded: $equipmentOpen) {
+                EquipmentMonitorSection(monitor: equipment, preview: preview, target: target).padding(.top, 10)
+            } label: { Label("装备监控", systemImage: "shield.lefthalf.filled").font(.headline) }
+        }.disclosureGroupStyle(FullWidthDisclosureStyle())
+    }
+}
+
+/// Only the header is a button; controls in expanded content retain their own hit areas.
+private struct FullWidthDisclosureStyle: DisclosureGroupStyle {
+    func makeBody(configuration: Configuration) -> some View {
+        VStack(alignment: .leading, spacing: 0) {
+            Button {
+                withAnimation(.easeInOut(duration: 0.16)) { configuration.isExpanded.toggle() }
+            } label: {
+                HStack(spacing: 10) {
+                    Image(systemName: configuration.isExpanded ? "chevron.down" : "chevron.right")
+                        .font(.caption.bold()).frame(width: 14)
+                    configuration.label
+                    Spacer(minLength: 0)
+                }
+                .frame(maxWidth: .infinity, minHeight: 44, alignment: .leading)
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityValue(configuration.isExpanded ? "已展开" : "已收起")
+            .accessibilityHint("点击整行展开或收起")
+            if configuration.isExpanded { configuration.content }
+        }
+    }
+}

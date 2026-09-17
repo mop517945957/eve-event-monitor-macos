@@ -4,25 +4,27 @@ import SwiftUI
 struct ScreenAlarmApp: App {
     @StateObject private var model = AppModel()
     @StateObject private var preview = MultiWindowPreview()
+    @StateObject private var equipment = EquipmentMonitor()
 
     var body: some Scene {
         WindowGroup("Screen Alarm") {
-            MainView().environmentObject(model).environmentObject(preview)
+            MainView().environmentObject(model).environmentObject(preview).environmentObject(equipment)
                 .frame(minWidth: 680, minHeight: 690)
         }
         .commands {
             CommandGroup(after: .appInfo) {
-                Button(preview.groupRunning ? "停止全部监控" : "开始全部监控") { preview.toggleAllMonitoring(model: model) }
+                Button((preview.groupRunning || equipment.running) ? "停止监护" : "开始监护") { preview.toggleProtection(model: model, equipment: equipment) }
                     .keyboardShortcut("m", modifiers: [.command, .shift])
-                Button("关闭报警") { model.dismissAlarm(); preview.dismissIntelAlarm() }.disabled(model.state != .triggered && preview.yellowIDs.isEmpty)
+                Button("静音当前提醒") { model.dismissAlarm(); preview.dismissIntelAlarm(); equipment.mute() }
                 Button("打开设置") { NSApp.activate(ignoringOtherApps: true) }
             }
         }
         MenuBarExtra {
             Text(model.statusText)
+            Text(equipment.running ? "装备监护：运行中" : "装备监护：未开启")
             Divider()
-            Button(preview.groupRunning ? "停止全部监控" : "开始全部监控") { preview.toggleAllMonitoring(model: model) }
-            Button("关闭报警") { model.dismissAlarm(); preview.dismissIntelAlarm() }.disabled(model.state != .triggered && preview.yellowIDs.isEmpty)
+            Button((preview.groupRunning || equipment.running) ? "停止监护" : "开始监护") { preview.toggleProtection(model: model, equipment: equipment) }
+            Button("静音当前提醒") { model.dismissAlarm(); preview.dismissIntelAlarm(); equipment.mute() }
             Button("打开设置") { NSApp.activate(ignoringOtherApps: true) }
             Divider()
             Button(preview.running ? "关闭多窗口预览" : "开启多窗口预览") { preview.toggle() }
@@ -31,7 +33,7 @@ struct ScreenAlarmApp: App {
             Divider()
             Button("退出") { NSApp.terminate(nil) }
         } label: {
-            Image(nsImage: model.isMonitoring ? MonitoringStatusIcon.running : MonitoringStatusIcon.stopped)
+            Image(nsImage: (model.isMonitoring || equipment.running) ? MonitoringStatusIcon.running : MonitoringStatusIcon.stopped)
                 .renderingMode(.original)
                 .accessibilityLabel("Screen Alarm：" + model.statusText)
         }

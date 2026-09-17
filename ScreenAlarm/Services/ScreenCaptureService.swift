@@ -4,6 +4,7 @@ import CoreImage
 
 final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     var onImage: ((CGImage) -> Void)?
+    var onFrameUnchanged: (() -> Void)?
     var onCaptureStopped: ((Error) -> Void)?
     private var stream: SCStream?
     private var source: Source?
@@ -32,7 +33,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
 
     /// Captures an individual composited window, independent from its position in
     /// the desktop. This lets detection continue while another window is frontmost.
-    func start(window target: WindowTarget, crop: WindowCrop?) async throws {
+    func start(window target: WindowTarget, crop: WindowCrop?, framesPerSecond: Int = 30) async throws {
         stop()
         let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: false)
         guard let window = resolveWindow(target, from: content.windows) else {
@@ -48,7 +49,7 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
         config.height = max(1, Int(window.frame.height * 2))
         config.pixelFormat = kCVPixelFormatType_32BGRA
         config.queueDepth = 3
-        config.minimumFrameInterval = CMTime(value: 1, timescale: 30)
+        config.minimumFrameInterval = CMTime(value: 1, timescale: Int32(max(1, min(60, framesPerSecond))))
         let stream = SCStream(filter: filter, configuration: config, delegate: self)
         try stream.addStreamOutput(self, type: .screen, sampleHandlerQueue: queue)
         self.stream = stream
@@ -98,6 +99,13 @@ final class ScreenCaptureService: NSObject, SCStreamOutput, SCStreamDelegate {
     func stop() { let current = stream; stream = nil; source = nil; if let current { Task { try? await current.stopCapture() } } }
 
     func stream(_ stream: SCStream, didOutputSampleBuffer sampleBuffer: CMSampleBuffer, of outputType: SCStreamOutputType) {
+        guard self.stream === stream else { return }
+        if outputType == .screen,
+           let metadata = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
+           let status = metadata.first?[.status] as? Int, status == SCFrameStatus.idle.rawValue {
+            onFrameUnchanged?()
+            return
+        }
         guard outputType == .screen, CMSampleBufferIsValid(sampleBuffer),
               let attachments = CMSampleBufferGetSampleAttachmentsArray(sampleBuffer, createIfNecessary: false) as? [[SCStreamFrameInfo: Any]],
               let status = attachments.first?[.status] as? Int, status == SCFrameStatus.complete.rawValue,

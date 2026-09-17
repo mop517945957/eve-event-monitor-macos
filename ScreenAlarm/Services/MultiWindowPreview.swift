@@ -257,6 +257,59 @@ final class MultiWindowPreview: ObservableObject {
     private var lockNotice: PreviewLockNotice?
     private var enableNotices = true
 
+    func isPreviewVisible(for target: WindowTarget) -> Bool { running && isSelected(target) }
+    func togglePreview(for target: WindowTarget) {
+        if isPreviewVisible(for: target) { select(target, enabled: false) }
+        else {
+            if !running {
+                selected = [key(for: target)]
+                defaults.set(Array(selected), forKey: "preview.selected")
+                toggle()
+            } else { select(target, enabled: true) }
+        }
+    }
+    func toggleProtection(for target: WindowTarget, model: AppModel, equipment: EquipmentMonitor) {
+        guard !groupStarting, equipment.calibrating == nil else { return }
+        if monitoredIDs.contains(target.windowID) || equipment.isRunning(for: target) {
+            monitors.removeValue(forKey: target.windowID)?.stop()
+            monitoredIDs.remove(target.windowID)
+            equipment.stop(for: target)
+            refreshGroupStatus()
+            return
+        }
+        model.refreshPermission()
+        guard model.hasPermission else { error = "请先授予屏幕录制权限"; return }
+        if !groupRunning { model.stopMonitoring(); groupModel = model; groupRunning = true }
+        monitoredIDs.insert(target.windowID)
+        if !isPreviewVisible(for: target) { togglePreview(for: target) }
+        equipment.start(targets: [target], adding: true)
+        if let crop = settings(for: target).crop {
+            let monitor = WindowMonitorSession(target: target, config: model.config)
+            monitors[target.windowID] = monitor
+            monitor.onChange = { [weak self, weak monitor] in
+                guard let self, let monitor, self.monitors[target.windowID] === monitor else { return }
+                self.refreshGroupStatus()
+            }
+            monitor.onError = { [weak self, weak monitor] message in
+                guard let self, let monitor, self.monitors[target.windowID] === monitor else { return }
+                self.error = "\(target.title)：\(message)"; self.refreshGroupStatus()
+            }
+            Task {
+                try? await monitor.start(crop: crop)
+                if monitors[target.windowID] !== monitor { monitor.stop() }
+            }
+        }
+        refreshGroupStatus()
+    }
+    func toggleProtection(model: AppModel, equipment: EquipmentMonitor) {
+        guard equipment.calibrating == nil else { return }
+        if groupRunning || equipment.running {
+            stopAllMonitoring(); equipment.stop()
+        } else {
+            startAllMonitoring(model: model)
+            if !equipment.rules.isEmpty { equipment.start(targets: visibleWindows) }
+        }
+    }
     func toggleAllMonitoring(model: AppModel) {
         if groupRunning { stopAllMonitoring() } else { startAllMonitoring(model: model) }
     }
@@ -287,17 +340,17 @@ final class MultiWindowPreview: ObservableObject {
                 let current = try await ScreenCaptureService().availableWindows()
                 guard groupRunning, groupGeneration == request else { return }
                 windows = current
-                let targets = visibleWindows.filter { settings(for: $0).crop != nil }
-                guard !targets.isEmpty else { stopAllMonitoring(); error = "未找到已保存监控区域的在线角色，请先为角色选择区域。"; return }
-                let missing = visibleWindows.filter { settings(for: $0).crop == nil }
+                let targets = visibleWindows
+                guard !targets.isEmpty else { stopAllMonitoring(); error = "未找到在线角色窗口，请先登录游戏。"; return }
                 for target in targets { selected.insert(key(for: target)) }
                 defaults.set(Array(selected), forKey: "preview.selected")
                 if !running { toggle() } else { refresh(); showPreviews() }
                 for target in targets {
-                    guard groupRunning, groupGeneration == request, let crop = settings(for: target).crop else { break }
+                    guard groupRunning, groupGeneration == request else { break }
+                    monitoredIDs.insert(target.windowID)
+                    guard let crop = settings(for: target).crop else { continue }
                     let monitor = WindowMonitorSession(target: target, config: model.config)
                     monitors[target.windowID] = monitor
-                    monitoredIDs.insert(target.windowID)
                     monitor.onChange = { [weak self] in self?.refreshGroupStatus() }
                     monitor.onError = { [weak self] message in
                         guard let self, self.groupGeneration == request else { return }
@@ -316,8 +369,7 @@ final class MultiWindowPreview: ObservableObject {
                 guard groupGeneration == request else { return }
                 groupStarting = false
                 refreshGroupStatus()
-                if monitors.isEmpty { groupRunning = false }
-                if !missing.isEmpty { error = "以下角色未设置监控区域，已跳过：" + missing.map(\.title).joined(separator: "、") }
+                if monitoredIDs.isEmpty { groupRunning = false }
             } catch {
                 guard groupGeneration == request else { return }
                 stopAllMonitoring(); self.error = error.localizedDescription
@@ -328,9 +380,9 @@ final class MultiWindowPreview: ObservableObject {
         for monitor in monitors.values { monitor.config = config }
     }
     private func refreshGroupStatus() {
-        if !groupStarting && monitors.isEmpty { groupRunning = false }
+        if !groupStarting && monitoredIDs.isEmpty { groupRunning = false }
         alarmIDs = Set(monitors.filter { $0.value.triggered }.map(\.key))
-        groupModel?.updateGroupStatus(running: !monitors.isEmpty, triggered: !alarmIDs.isEmpty)
+        groupModel?.updateGroupStatus(running: !monitoredIDs.isEmpty, triggered: !alarmIDs.isEmpty)
         refreshIntelWarnings()
         updateAlarm(target: nil, active: !alarmIDs.isEmpty)
     }
@@ -538,7 +590,7 @@ final class MultiWindowPreview: ObservableObject {
         }.sorted().joined(separator: ";")
         let soundWanted = !yellowIDs.isEmpty && alarmIDs.isEmpty && intelSignature != mutedIntelSignature
         if soundWanted && !yellowSoundRunning {
-            yellowSound.startRepeating(path: nil, interval: 8, volume: groupModel?.config.alarmVolume ?? 0.8)
+            yellowSound.startVoice(.intel, volume: groupModel?.config.alarmVolume ?? 0.8)
             yellowSoundRunning = true
         } else if !soundWanted && yellowSoundRunning {
             yellowSound.stop(); yellowSoundRunning = false
@@ -595,8 +647,8 @@ final class MultiWindowPreview: ObservableObject {
                 })
                 windows = Self.retainingLiveWindows(discovered: discovered, previous: retained, livePIDs: livePIDs)
                 if groupRunning {
-                    let removed = monitors.keys.filter { id in
-                        guard let target = monitors[id]?.target else { return false }
+                    let removed = monitoredIDs.filter { id in
+                        guard let target = retained.first(where: { $0.windowID == id }) else { return true }
                         return !livePIDs.contains(target.applicationPID)
                     }
                     for id in removed { monitors.removeValue(forKey: id)?.stop(); monitoredIDs.remove(id) }
@@ -965,15 +1017,17 @@ struct MultiWindowPreviewSection: View {
     }
 }
 
-private struct WindowSettingsCard: View {
+struct WindowSettingsCard: View {
     @EnvironmentObject private var model: AppModel
     @ObservedObject var preview: MultiWindowPreview
     let target: WindowTarget
+    var embedded = false
     @State private var expanded = false
     private var isTarget: Bool { model.config.captureMode == .window && model.config.windowTarget?.windowID == target.windowID }
     private var settings: WindowPreviewSettings { preview.settings(for: target) }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
+            if !embedded {
             HStack {
                 Button { expanded.toggle() } label: {
                     Image(systemName: expanded ? "chevron.down" : "chevron.right").frame(width: 18)
@@ -985,7 +1039,8 @@ private struct WindowSettingsCard: View {
                 Button(expanded ? "收起" : "设置") { expanded.toggle() }.buttonStyle(.borderless)
             }
             CharacterIntelView(intel: preview.intel, title: target.title, monitoring: preview.monitoredIDs.contains(target.windowID))
-            if expanded {
+            }
+            if expanded || embedded {
                 Divider()
                 HStack {
                     Text("监控区域").frame(width: 85, alignment: .leading)
@@ -1034,4 +1089,34 @@ private struct WindowSettingsCard: View {
             if isTarget, let crop = model.config.windowCrop, settings.crop == nil { preview.setCrop(crop, for: target) }
         }
     }
+}
+
+struct SharedPreviewSettings: View {
+    @ObservedObject var preview: MultiWindowPreview
+    var body: some View { VStack(alignment: .leading, spacing: 12) {
+        Toggle("预览置顶", isOn: $preview.alwaysOnTop)
+            HStack {
+                Text("预览刷新率")
+                Picker("预览刷新率", selection: Binding(get: { preview.frameRate }, set: { preview.setFrameRate($0) })) {
+                    ForEach([10, 15, 30, 60], id: \.self) { Text("\($0) FPS").tag($0) }
+                }.labelsHidden().frame(width: 105)
+                Spacer()
+                Button(preview.isLocked ? "解锁预览" : "锁定并穿透点击") { preview.toggleLock() }
+                Label(preview.isLocked ? "已锁定 · 点击穿透" : "可点击", systemImage: preview.isLocked ? "lock.fill" : "lock.open")
+                    .font(.caption).foregroundStyle(preview.isLocked ? .orange : .secondary)
+            }
+            HStack {
+                Text("锁定快捷键")
+                Picker("组合键", selection: Binding(get: { preview.shortcutModifiers }, set: { preview.configureShortcut(key: preview.shortcutKey, modifiers: $0) })) {
+                    ForEach(MultiWindowPreview.modifierChoices, id: \.1) { Text($0.0).tag($0.1) }
+                }.labelsHidden().frame(width: 215)
+                Picker("按键", selection: Binding(get: { preview.shortcutKey }, set: { preview.configureShortcut(key: $0, modifiers: preview.shortcutModifiers) })) {
+                    ForEach(MultiWindowPreview.keyChoices, id: \.1) { Text($0.0).tag($0.1) }
+                }.labelsHidden().frame(width: 80)
+                Text(preview.shortcutAvailable ? "全局生效" : "快捷键未启用").font(.caption).foregroundStyle(.secondary)
+            }
+            Text("锁定后所有角色预览不接收鼠标点击或拖动；报警自动解锁，解除报警后保持可点击。实际刷新率受游戏后台帧率影响，60 FPS 会增加资源占用。")
+                .font(.caption).foregroundStyle(.secondary)
+
+    } }
 }

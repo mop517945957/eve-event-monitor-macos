@@ -198,6 +198,12 @@ struct CharacterIntel {
     let nearest: IntelReport?
     let jumps: Int?
 }
+struct CharacterIntelPreferences: Codable, Equatable {
+    var enabled: Bool
+    var range: Int
+    var lifetime: Int
+    var channels: Set<String>
+}
 @MainActor
 final class LocalIntel: ObservableObject {
     @Published var enabled: Bool { didSet { defaults.set(enabled, forKey: "intel.enabled"); changed() } }
@@ -205,6 +211,15 @@ final class LocalIntel: ObservableObject {
     @Published var lifetime: Int { didSet { defaults.set(lifetime, forKey: "intel.lifetime"); changed() } }
     @Published var channels: Set<String> { didSet { defaults.set(Array(channels), forKey: "intel.channels"); changed() } }
     @Published var directory: String { didSet { defaults.set(directory, forKey: "intel.directory"); snapshot = IntelSnapshot(); changed() } }
+    @Published private var characterPreferences: [String: CharacterIntelPreferences] = [:]
+    func preferences(for title: String) -> CharacterIntelPreferences {
+        characterPreferences[title.lowercased()] ?? CharacterIntelPreferences(enabled: enabled, range: range, lifetime: lifetime, channels: channels)
+    }
+    func setPreferences(_ value: CharacterIntelPreferences, for title: String) {
+        characterPreferences[title.lowercased()] = value
+        defaults.set(try? JSONEncoder().encode(characterPreferences), forKey: "intel.perCharacter.v1")
+        changed()
+    }
     @Published private(set) var snapshot = IntelSnapshot()
     @Published private(set) var mapError: String?
     let graph: IntelGraph?
@@ -217,6 +232,7 @@ final class LocalIntel: ObservableObject {
         range = min(30, max(0, defaults.object(forKey: "intel.range") as? Int ?? 3))
         lifetime = min(30, max(1, defaults.object(forKey: "intel.lifetime") as? Int ?? 5))
         channels = Set(defaults.stringArray(forKey: "intel.channels") ?? [])
+        if let data = defaults.data(forKey: "intel.perCharacter.v1"), let saved = try? JSONDecoder().decode([String: CharacterIntelPreferences].self, from: data) { characterPreferences = saved }
         directory = defaults.string(forKey: "intel.directory") ?? NSHomeDirectory() + "/Documents/EVE/logs"
         if let url = Bundle.main.url(forResource: "IntelMap", withExtension: "json"),
            let data = try? Data(contentsOf: url), let map = try? JSONDecoder().decode(IntelMap.self, from: data) {
@@ -252,7 +268,8 @@ final class LocalIntel: ObservableObject {
         title.lowercased().hasPrefix("eve - ") ? String(title.dropFirst(6)).trimmingCharacters(in: .whitespacesAndNewlines) : ""
     }
     func status(for title: String, now: Date = Date()) -> CharacterIntel {
-        Self.evaluate(title: title, graph: graph, snapshot: snapshot, enabled: enabled, channels: channels, range: range, lifetime: lifetime, now: now)
+        let settings = preferences(for: title)
+        return Self.evaluate(title: title, graph: graph, snapshot: snapshot, enabled: settings.enabled, channels: settings.channels, range: settings.range, lifetime: settings.lifetime, now: now)
     }
     static func evaluate(title: String, graph: IntelGraph?, snapshot: IntelSnapshot, enabled: Bool, channels: Set<String>, range: Int, lifetime: Int, now: Date) -> CharacterIntel {
         let name = Self.characterName(title)
@@ -273,22 +290,27 @@ final class LocalIntel: ObservableObject {
 
 struct IntelSettingsSection: View {
     @ObservedObject var intel: LocalIntel
+    var title: String = ""
+    private var settings: CharacterIntelPreferences { intel.preferences(for: title) }
+    private func binding<T>(_ key: WritableKeyPath<CharacterIntelPreferences, T>) -> Binding<T> {
+        Binding(get: { settings[keyPath: key] }, set: { var value = settings; value[keyPath: key] = $0; intel.setPreferences(value, for: title) })
+    }
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            Toggle("预警频道 · 黄色预警", isOn: $intel.enabled).font(.headline)
+            Toggle("预警频道 · 黄色预警", isOn: binding(\.enabled)).font(.headline)
             HStack {
-                Stepper("预警范围：\(intel.range) 跳以内", value: $intel.range, in: 0...30)
+                Stepper("预警范围：\(settings.range) 跳以内", value: binding(\.range), in: 0...30)
                 Spacer()
-                Stepper("报告有效期：\(intel.lifetime) 分钟", value: $intel.lifetime, in: 1...30)
+                Stepper("报告有效期：\(settings.lifetime) 分钟", value: binding(\.lifetime), in: 1...30)
             }
-            Text("点击“开始全部监控”后生效。每个角色独立定位和计算；0 跳也为黄色，视觉发现危险才报红色。只计算普通星门最短路径。").font(.caption).foregroundStyle(.secondary)
+            Text("点击顶部“开始监护”后生效。此处设置仅影响当前角色；0 跳也为黄色，视觉发现危险才报红色。只计算普通星门最短路径。").font(.caption).foregroundStyle(.secondary)
             ForEach(intel.snapshot.channels.sorted(), id: \.self) { channel in
-                Toggle(channel, isOn: Binding(get: { intel.channels.contains(channel) }, set: { selected in
-                    if selected { intel.channels.insert(channel) } else { intel.channels.remove(channel) }
+                Toggle(channel, isOn: Binding(get: { settings.channels.contains(channel) }, set: { selected in
+                    var value = settings; if selected { value.channels.insert(channel) } else { value.channels.remove(channel) }; intel.setPreferences(value, for: title)
                 })).toggleStyle(.checkbox)
             }
             if intel.snapshot.channels.isEmpty { Text("尚未发现玩家频道日志，请先在游戏中打开预警频道并启用聊天记录。").font(.caption) }
-            HStack { Text(intel.directory).font(.caption).textSelection(.enabled); Spacer(); Button("选择日志目录") { intel.chooseDirectory() } }
+
             Text("每 2 秒读取新增记录。按消息开头的完整星系名识别，忽略状态询问；clr / clear 清除同频道报告。过期只表示报告失效，不代表安全。").font(.caption).foregroundStyle(.secondary)
             if intel.snapshot.checked != .distantPast { Text("最近读取：\(intel.snapshot.checked.formatted(date: .omitted, time: .standard))").font(.caption).foregroundStyle(.secondary) }
             if let graph = intel.graph { Text("离线星图：\(graph.map.systems.count) 个星系 · SDE \(graph.map.build)").font(.caption).foregroundStyle(.secondary) }

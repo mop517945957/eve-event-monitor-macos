@@ -2,6 +2,21 @@ import Foundation
 
 @main struct LocalIntelTests {
     @MainActor static func main() async throws {
+        let suite = "IntelPreferencesTests-\(UUID())"
+        let defaults = UserDefaults(suiteName: suite)!
+        defer { defaults.removePersistentDomain(forName: suite) }
+        defaults.set(5, forKey: "intel.range")
+        defaults.set(["legacy"], forKey: "intel.channels")
+        let intel = LocalIntel(defaults: defaults, start: false)
+        precondition(intel.preferences(for: "EVE - Alpha").range == 5)
+        var alpha = intel.preferences(for: "EVE - Alpha")
+        alpha.range = 2; alpha.lifetime = 7; alpha.channels = ["AlphaIntel"]; alpha.enabled = false
+        intel.setPreferences(alpha, for: "EVE - Alpha")
+        precondition(intel.preferences(for: "EVE - Beta").range == 5)
+        precondition(intel.preferences(for: "EVE - Beta").channels == ["legacy"])
+        let restored = LocalIntel(defaults: defaults, start: false)
+        precondition(restored.preferences(for: "eve - alpha") == alpha)
+        print("PASS: per-character channels, range, expiry, enabled isolation, legacy defaults and persistence")
         let map = try JSONDecoder().decode(IntelMap.self, from: Data(contentsOf: URL(fileURLWithPath: "ScreenAlarm/Resources/IntelMap.json")))
         let graph = IntelGraph(map), parser = IntelParser(graph: graph)
         let a = graph.aliases["yg-82v"]!, b = graph.aliases["ub-uqz"]!, c = graph.aliases["xm-4l0"]!
